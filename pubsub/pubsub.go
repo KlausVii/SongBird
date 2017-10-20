@@ -1,4 +1,4 @@
-package agent
+package pubsub
 
 import (
 	"context"
@@ -7,13 +7,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/pubsub"
-	log "github.com/cihub/seelog"
-)
-
-const (
-	ProjectID = "songbird"
-	Topic     = "songbird"
-	sub       = "subsub"
+	"github.com/murlokswarm/log"
+	"github.com/pkg/errors"
 )
 
 type Msg struct {
@@ -28,16 +23,14 @@ func (m *Msg) Read() []byte {
 	return m.msg.Data
 }
 
-func ListenToTopic() (chan Msg, chan struct{}, error) {
-	ctx := context.Background()
-	log.Info("starting pubsub")
-	c, t, err := StartPubSub(ctx, ProjectID, Topic)
+func ListenTopicWithClient(ctx context.Context, topicName string, c *pubsub.Client) (chan Msg, chan struct{}, error) {
+	kill := make(chan struct{})
+	log.Info("starting listen")
+	topic, err := createTopic(ctx, topicName, c)
 	if err != nil {
 		return nil, nil, err
 	}
-	kill := make(chan struct{})
-	log.Info("starting listen")
-	ch, err := listenToTopic(ctx, c, t, kill)
+	ch, err := listenToTopic(ctx, c, topic, kill)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -45,34 +38,52 @@ func ListenToTopic() (chan Msg, chan struct{}, error) {
 	return ch, kill, nil
 }
 
-func StartPubSub(ctx context.Context, projectID, topicName string) (*pubsub.Client, *pubsub.Topic, error) {
-	// Creates a client.
-	client, err := pubsub.NewClient(ctx, projectID)
+func CreatePublishToTopic(ctx context.Context, c *pubsub.Client, t string, msg []byte) error {
+	topic, err := createTopic(ctx, t, c)
 	if err != nil {
-		log.Errorf("Failed to create client: %v", err)
-		return nil, nil, err
+		return err
 	}
+	_ = topic.Publish(ctx, &pubsub.Message{
+		Data: msg,
+	})
+	log.Infof("tried to publish %v", msg)
+	return nil
+}
 
-	topic := client.Topic(topicName)
+func PublishToExistingTopic(ctx context.Context, c *pubsub.Client, t string, msg []byte) error {
+	topic, err := getTopicIfExists(ctx, t, c)
+	if err != nil {
+		return err
+	}
+	_ = topic.Publish(ctx, &pubsub.Message{
+		Data: msg,
+	})
+	log.Infof("tried to publish %v", msg)
+	return nil
+}
+
+func createTopic(ctx context.Context, topicName string, c *pubsub.Client) (*pubsub.Topic, error) {
+	topic, err := getTopicIfExists(ctx, topicName, c)
+	if err != nil {
+		log.Info("topic does not exist")
+		// Creates the new topic.
+		return c.CreateTopic(ctx, topicName)
+	}
+	return topic, nil
+}
+
+func getTopicIfExists(ctx context.Context, topicName string, c *pubsub.Client) (*pubsub.Topic, error) {
+	topic := c.Topic(topicName)
 	ok, err := topic.Exists(ctx)
 	if err != nil {
-		log.Errorf("Failed to create topic: %v", err)
-		return nil, nil, err
+		log.Errorf("Failed to check topic: %v", err)
+		return nil, err
 	}
-	if ok {
-		log.Info("topic exists")
-		return client, topic, nil
+	if !ok {
+		log.Info("topic does not exist")
+		return nil, errors.New("topic does not exist")
 	}
-	log.Info("topic does not exist")
-	// Creates the new topic.
-	topic, err = client.CreateTopic(ctx, topicName)
-	if err != nil {
-		log.Errorf("Failed to create topic: %v", err)
-		return nil, nil, err
-	}
-
-	log.Infof("Topic %v created.\n", topic)
-	return client, topic, nil
+	return topic, nil
 }
 
 func createSub(client *pubsub.Client, name string, topic *pubsub.Topic) error {
@@ -109,7 +120,7 @@ func listenToTopic(ctx context.Context, client *pubsub.Client, topic *pubsub.Top
 	//received := 0
 	sub := client.Subscription(subName)
 	//cctx, cancel := context.WithCancel(ctx)
-	ch := make(chan Msg, maxBuffer)
+	ch := make(chan Msg)
 	go func() {
 		select {
 		case <-kill:

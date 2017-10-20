@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package songbird;
+
+message Request {
+    string topic = 1;
+    string req = 2;
+}
+
+message Response {
+    string rsp = 1;
+}

@@ -1,12 +1,11 @@
-package handlers
+package agent
 
 import (
 	"net/http"
 
-	"github.com/KlausVii/SongBird/agent"
-	log "github.com/cihub/seelog"
 	"github.com/gorilla/websocket"
 	"github.com/julienschmidt/httprouter"
+	"github.com/murlokswarm/log"
 )
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request, p httprouter.Params) {
@@ -18,12 +17,16 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, p httprouter.Params
 	}
 	defer c.Close()
 	if err = c.WriteMessage(websocket.TextMessage, []byte("welcome!")); err != nil {
-		log.Error("welcome: %v", err)
+		log.Errorf("welcome: %v", err)
 		return
 	}
-	a := agent.NewAgent()
-	go a.Listen(c)
-	go a.Talk(c)
-	for a.Alive() {
+	a := NewAgent()
+	ch, err := a.Start(c)
+	if err != nil {
+		log.Errorf("start failed: %v", err)
+		return
 	}
+	<-ch
+	a.Stop()
+	log.Infof("session closed")
 }
