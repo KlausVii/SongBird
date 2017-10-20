@@ -45,7 +45,7 @@ func handler(req songbird.Request, c *pubsub.Client) error {
 	log.Infof("received req: %v", req.GetReq())
 	log.Infof("responding on topic: %v", req.GetTopic())
 	rsp := songbird.Response{
-		Rsp: "message received",
+		Rsp: "message handled",
 	}
 	m, err := proto.Marshal(&rsp)
 	if err != nil {

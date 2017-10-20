@@ -15,9 +15,9 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request, p httprouter.Params
 		log.Errorf("upgrade: %v", err)
 		return
 	}
-	defer c.Close()
 	if err = c.WriteMessage(websocket.TextMessage, []byte("welcome!")); err != nil {
 		log.Errorf("welcome: %v", err)
+		c.Close()
 		return
 	}
 	a := NewAgent()

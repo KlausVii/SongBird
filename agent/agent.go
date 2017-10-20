@@ -23,12 +23,11 @@ const maxBuffer = 512
 type agentImpl struct {
 	conn       *websocket.Conn
 	psClient   *pubsub.Client
-	alive      chan struct{}
 	auth       bool
+	killCh     chan struct{}
+	alive      chan struct{}
 	listenBuff chan []byte
 	talkBuff   chan []byte
-	msgCh      chan ps.Msg
-	killCh     chan struct{}
 }
 
 func NewAgent() Agent {
@@ -44,8 +43,8 @@ func (a *agentImpl) Start(c *websocket.Conn) (chan struct{}, error) {
 	if c == nil {
 		return nil, errors.New("nil connection")
 	}
-	a.alive = make(chan struct{})
 	a.killCh = make(chan struct{})
+	a.alive = make(chan struct{})
 	a.conn = c
 	var err error
 	a.psClient, err = pubsub.NewClient(context.Background(), consts.ProjectID)
@@ -60,32 +59,33 @@ func (a *agentImpl) Start(c *websocket.Conn) (chan struct{}, error) {
 }
 
 func (a *agentImpl) Stop() {
-	// todo
+	if err := a.conn.Close(); err != nil {
+		log.Error(err)
+	}
 	return
 }
 
+func (a *agentImpl) shutdown() {
+	a.talkBuff <- []byte("shutting down")
+	close(a.talkBuff)
+	close(a.listenBuff)
+	close(a.killCh)
+	close(a.alive)
+
+}
 func (a *agentImpl) handle() {
 	for {
 		select {
-		case msg := <-a.msgCh:
-			a.talkBuff <- msg.Read()
-			msg.Ack()
-		case msg := <-a.listenBuff:
+		case msg, ok := <-a.listenBuff:
+			if !ok {
+				log.Info("stopped handling")
+				return
+			}
 			switch {
 			case a.isAuth():
-				ret, err := a.do(string(msg))
-				if err != nil {
-					log.Error(err)
-					return
-				}
-				a.talkBuff <- ret
+				a.do(string(msg))
 			case string(msg) == "login":
-				ret, err := a.login()
-				if err != nil {
-					log.Error(err)
-					return
-				}
-				a.talkBuff <- ret
+				a.login()
 			default:
 				a.talkBuff <- []byte("Please login")
 			}
@@ -109,8 +109,11 @@ func (a *agentImpl) talk() {
 	log.Info("talking")
 	for {
 		select {
-		case msg := <-a.talkBuff:
-			log.Infof("saying: %s", string(msg))
+		case msg, ok := <-a.talkBuff:
+			if !ok {
+				log.Info("stopped talking")
+				return
+			}
 			if err := a.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				log.Error(err)
 				return
@@ -119,37 +122,37 @@ func (a *agentImpl) talk() {
 	}
 }
 
-func (a *agentImpl) login() ([]byte, error) {
+func (a *agentImpl) login() {
 	a.auth = true
-	return []byte("successful login"), nil
+	a.talkBuff <- []byte("successful login")
+	return
 }
 
 func (a *agentImpl) isAuth() bool {
 	return a.auth
 }
 
-func (a *agentImpl) do(req string) ([]byte, error) {
+func (a *agentImpl) do(req string) {
 	switch req {
 	case "listen":
-		return a.startListen()
+		a.startListen()
 	case "kill":
-		close(a.killCh)
-		close(a.alive)
-		return []byte("dying"), nil
+		a.shutdown()
 	case "req":
-		return a.makeReq()
+		a.makeReq()
 	default:
+		a.talkBuff <- append([]byte("I'm sorry I cannot do: "), []byte(req)...)
 	}
-	return append([]byte("I'm sorry I cannot do: "), []byte(req)...), nil
 }
 
-func (a *agentImpl) makeReq() ([]byte, error) {
+func (a *agentImpl) makeReq() {
 	log.Info("making req")
 	reqTopicName := "req"
 	msgCh, kCh, err := ps.ListenTopicWithClient(context.Background(), reqTopicName, a.psClient)
 	if err != nil {
 		log.Error(err)
-		return nil, err
+		a.talkBuff <- []byte(err.Error())
+		return
 	}
 	go func() {
 		select {
@@ -168,20 +171,36 @@ func (a *agentImpl) makeReq() ([]byte, error) {
 	reqByte, err := proto.Marshal(&req)
 	if err != nil {
 		log.Error(err)
-		return nil, err
+		a.talkBuff <- []byte(err.Error())
+		return
 	}
 	if err := ps.PublishToExistingTopic(context.Background(), a.psClient, consts.APITopic, reqByte); err != nil {
 		log.Error(err)
-		return nil, err
+		a.talkBuff <- []byte(err.Error())
+		return
 	}
-	return []byte("made request, awaiting reply"), nil
+	a.talkBuff <- []byte("made request, awaiting reply")
 }
 
-func (a *agentImpl) startListen() ([]byte, error) {
-	var err error
-	a.msgCh, a.killCh, err = ps.ListenTopicWithClient(context.Background(), consts.APITopic, a.psClient)
-	if err != nil {
-		return nil, err
-	}
-	return []byte("started listening api topic"), nil
+func (a *agentImpl) startListen() {
+	go func() {
+		msgCh, killCh, err := ps.ListenTopicWithClient(context.Background(), consts.APITopic, a.psClient)
+		if err != nil {
+			a.talkBuff <- []byte(err.Error())
+			return
+		}
+		for {
+			select {
+			case <-a.killCh:
+				log.Info("stopped pub sub listen")
+				close(killCh)
+				return
+			case m := <-msgCh:
+				a.talkBuff <- m.Read()
+				m.Ack()
+			}
+		}
+	}()
+	a.talkBuff <- []byte("started listening api topic")
+	return
 }

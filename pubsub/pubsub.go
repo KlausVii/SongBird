@@ -122,15 +122,10 @@ func listenToTopic(ctx context.Context, client *pubsub.Client, topic *pubsub.Top
 	//cctx, cancel := context.WithCancel(ctx)
 	ch := make(chan Msg)
 	go func() {
-		select {
-		case <-kill:
-			log.Info(sub.Delete(ctx))
-			return
-		default:
-		}
 		err := sub.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
 			select {
 			case <-kill:
+				log.Info(sub.Delete(ctx))
 				return
 			default:
 			}
